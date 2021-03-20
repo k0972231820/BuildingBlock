@@ -1,0 +1,736 @@
+#include <stdio.h>
+#include <iostream>
+#include <windows.h>
+#include <time.h>
+#include <fstream>      
+#include "opencv2/video/tracking.hpp"
+#include "opencv2/core/core.hpp"
+#include "opencv2/imgproc/imgproc.hpp"
+#include "opencv2/nonfree/features2d.hpp"
+#include "opencv2/features2d/features2d.hpp"
+#include "opencv2/highgui/highgui.hpp"
+#include "opencv2/legacy/legacy.hpp"
+#include "opencv2/calib3d/calib3d.hpp"
+#include "opencv2/nonfree/nonfree.hpp"  
+
+using namespace cv;
+using namespace std;
+
+struct blocks_img {
+	Mat img;
+	Mat cimg;
+	boolean find;
+	int confidence;
+	Point2f point1, point2, point3, point4, left, right;
+};
+
+bool FeatureCompare(vector<DMatch>matches, vector<KeyPoint> keypoints_1, vector<KeyPoint> keypoints_2, blocks_img &block, Mat &img_2, Point2f &left, Point2f &right);
+void Matching(blocks_img buildingblock[12], Mat &video, int type);
+void RemoveKeyPoint(Point2f left, Point2f right, vector<KeyPoint> &video_keypoints);
+void sobel(Mat grayImg, Mat grad);
+void Ransac(vector<KeyPoint> keypoints1, vector<KeyPoint> keypoints2, vector<DMatch> matchers);
+void GetH(int x, int y, Mat image, float HSL[3]);
+Mat Change(Mat src, Mat dst);
+void RemoveOutRange(vector<DMatch> &matches, vector<KeyPoint>keypoints);
+float getDistance (Point2f point1,Point2f point2 ) ;
+void ReadBlocks(blocks_img blocks[14]);
+boolean checkError(blocks_img input, int index);
+void WriteFile();
+void Contour(Mat img);
+Mat Rotate(Mat src, float angle);
+void Match(Mat src, Mat roi, int &same);
+void ChargeRotation(int index, Point2f point[4], Point2f &left, Point2f &right);
+
+int minHessian = 500;
+int num = 0, isFind = 0;
+Mat img;
+blocks_img blocks[14];
+Point2f boundingbox[14];
+
+int main(){
+	ReadBlocks(blocks); //讀取Block比對圖片
+	
+	Mat img_3;
+	VideoCapture video(0);
+	//if (!video.isOpened()) {
+	//	cout << "Camera Open failed" << endl;
+	//	return -1;
+	//}
+
+	//cout << video.get(CV_CAP_PROP_FRAME_WIDTH) << " " << video.get(CV_CAP_PROP_FRAME_HEIGHT) << endl;
+	//video.set(CV_CAP_PROP_FRAME_WIDTH, 1920);
+	//video.set(CV_CAP_PROP_FRAME_HEIGHT, 1080);
+	Mat videoFrame;
+	time_t start, mid, temp;
+	start = time(NULL);
+	
+	while(true){
+		//video >> videoFrame;
+		videoFrame = imread("E:\\LAB602資料\\雜用資料\\full_5.PNG");
+		if(videoFrame.empty()){
+			break;
+		}
+
+		Mat videos[3] ;
+		img_3 = Change(videoFrame, img_3);
+		GaussianBlur(img_3, img_3, Size(5,5), 0, 0);
+		videos[0] = img_3;
+		Contour(img_3);
+		//if (GetAsyncKeyState( 'B' ) & 0x8000) {
+			//for ( int i = 0; i < 14 ; i++ ) {
+			//	if (blocks[i].find) {
+			//		/*line(videos[0], blocks[i].point1, blocks[i].point2, Scalar(0, 255, 0), 4);
+			//		line(videos[0], blocks[i].point2, blocks[i].point3, Scalar(0, 255, 0), 4);
+			//		line(videos[0], blocks[i].point3, blocks[i].point4, Scalar(0, 255, 0), 4);
+			//		line(videos[0], blocks[i].point4, blocks[i].point1, Scalar(0, 255, 0), 4);*/
+			//		//if (i==13){
+			//		circle(img_3, blocks[i].left, 5, Scalar(0,255,0));
+			//		circle(img_3, blocks[i].right, 5, Scalar(0,0,255));
+			//		//}
+			//	}
+			//}
+			//imshow("result", img_3);
+		//}
+		imshow("frame", videos[0]);
+		imshow("test", videoFrame);
+		waitKey(33);
+		break;
+	}
+
+	WriteFile();
+	for ( int i = 0; i < 14 ; i++ ) {
+		circle(img_3, blocks[i].left, 5, Scalar(0,255,0));
+		circle(img_3, blocks[i].right, 5, Scalar(0,0,255));
+	}
+	imshow("result", img_3);
+	waitKey(0);
+	system("pause");
+	return 0;
+}
+
+void Matching(blocks_img buildingblock[12], Mat &video, int type) {
+	SurfFeatureDetector detector(minHessian);
+	SurfDescriptorExtractor extractor;
+
+	std::vector<KeyPoint> video_keypoints;
+	detector.detect(video, video_keypoints);
+	Mat video_descriptors;
+
+	extractor.compute(video, video_keypoints, video_descriptors);
+
+	int i = 0;
+	if (type == 2) i = 12;
+	for ( ; i < 14 ; i++ ) {
+		if ( !buildingblock[i].find ) {
+		num = i;
+		std::vector<KeyPoint> block_keypoints;
+		Mat block_descriptors;
+		detector.detect(buildingblock[i].cimg, block_keypoints);
+
+		if ( video_keypoints.size() == 0 || block_keypoints.size() == 0 ) {
+			if (video_keypoints.size() == 0) cout << "1 no keypoints" << endl;
+			if (block_keypoints.size() == 0) cout << "2 no keypoints" << endl;
+			//video_keypoints.clear();
+			block_keypoints.clear();
+			return;
+		}
+
+		extractor.compute(buildingblock[i].cimg, block_keypoints, block_descriptors);
+
+		Mat img_keypoints_1, img_keypoints_2;
+		drawKeypoints(buildingblock[0].cimg, block_keypoints, img_keypoints_1, Scalar::all(-1), DrawMatchesFlags::DEFAULT);
+		imshow("blocks keypoints", img_keypoints_1);
+
+		BFMatcher matcher(NORM_L2);
+		//FlannBasedMatcher matcher;
+		vector<DMatch>matches;
+		
+		/*std::vector<vector<DMatch> > knnMatches;
+		matcher.knnMatch(block_descriptors, video_descriptors, knnMatches,2);
+		const float minRatio = 1.f / 1.5f;
+		for (size_t i=0; i<knnMatches.size(); i++)  
+		{  
+			const cv::DMatch& bestMatch = knnMatches[i][0];  
+			const cv::DMatch& betterMatch = knnMatches[i][1];  
+			float distanceRatio = bestMatch.distance / betterMatch.distance;  
+			if (distanceRatio < minRatio)  
+			{  
+				matches.push_back(bestMatch);  
+			}  
+		}*/
+		
+		matcher.match(block_descriptors, video_descriptors, matches);
+		Ransac(block_keypoints, video_keypoints, matches);
+		if ( matches.size() == 0 ) {
+			block_keypoints.clear();
+			//video_keypoints.clear();
+			matcher.clear();
+			matches.clear();
+			cout << "no match" << endl ;
+			return ;
+		}
+
+		//RemoveOutRange(matches, video_keypoints);
+		//if (i == 0) cout << "1 matches num: " << matches.size() << endl;
+	    //if (i == 1) cout << "2 matches num: " << matches.size() << endl;
+		Point2f left, right;
+		bool success = FeatureCompare(matches, block_keypoints, video_keypoints, buildingblock[i], video, left, right);
+		
+		//cout << "video keypoint: " << video_keypoints.size() << " - " << matches.size() << endl;
+		if ( success ) {
+			if ( !checkError(buildingblock[i], i) ) {
+				buildingblock[i].find = true;
+				Point points[1][4];
+				points[0][0] = buildingblock[i].point1;
+				points[0][1] = buildingblock[i].point2;
+				points[0][2] = buildingblock[i].point3;
+				points[0][3] = buildingblock[i].point4;
+				const Point* ppt[1] = {points[0]};
+				int npt[] = {4};
+				polylines(video, ppt, npt, 1, 1, Scalar(255,255,255),5);
+				fillPoly(video, ppt, npt, 1, Scalar(255,255,255));
+				//circle(video[0], buildingblock[i].point1, 5, Scalar(0, 255, 0), CV_FILLED);
+				//cout << "success" << endl;
+			}
+			isFind++;
+		}
+		
+		//cout << "Remove video keypoint: " << video_keypoints.size() << endl;
+		matcher.clear();
+		matches.clear();
+		} // if()
+
+		if (i >= 11 && type == 1) i = 14;
+	}
+	
+	video_keypoints.clear();
+}
+
+void RemoveKeyPoint(Point2f left, Point2f right, vector<KeyPoint> &video_keypoints) {
+	vector<KeyPoint> temp;
+	Point2f center = Point2f((left.x+right.x)/2, (left.y+right.y)/2);
+	float radius = getDistance(left, right)/2;
+	
+	//cout << "radius: " << radius << endl;
+	for (size_t i = 0; i < video_keypoints.size(); i++) {
+		Point2f keypoint = Point2f(video_keypoints[i].pt.x, video_keypoints[i].pt.y);
+		if ( getDistance(center, keypoint) > radius ) {
+			temp.push_back(video_keypoints[i]);
+			circle(img, keypoint, 3, Scalar(0, 0, 255), CV_FILLED);
+		}
+	}
+
+	video_keypoints = temp;
+}
+
+bool FeatureCompare(vector<DMatch>matches, vector<KeyPoint> keypoints_1, vector<KeyPoint> keypoints_2, blocks_img &block, Mat &img_2, Point2f &left, Point2f &right) {
+	Mat img_1 = block.cimg;
+	Mat img_matches;
+	drawMatches(img_1, keypoints_1, img_2, keypoints_2, matches, img_matches);
+    
+    //-- Localize the object
+	std::vector<Point2f> obj;
+	std::vector<Point2f> scene;
+	for (size_t i = 0; i < matches.size(); i++)
+	{
+		//-- Get the keypoints from the good matches
+		obj.push_back(keypoints_1[matches[i].queryIdx].pt);
+		scene.push_back(keypoints_2[matches[i].trainIdx].pt);
+	}
+	if (num == 1) cout << "obj:" << obj.size() << " scene: " << scene.size() << endl ;
+	Mat R = estimateRigidTransform(obj, scene, false);
+	if (R.cols == 0) {
+		cout << "macth error" << endl;
+		keypoints_1.clear();
+		//keypoints_2.clear();
+		//matcher.clear();
+		matches.clear();
+		obj.clear();
+		scene.clear();
+		return false;
+	}
+	Mat H = Mat(3, 3, R.type());
+	H.at<double>(0, 0) = R.at<double>(0, 0);
+	H.at<double>(0, 1) = R.at<double>(0, 1);
+	H.at<double>(0, 2) = R.at<double>(0, 2);
+
+	H.at<double>(1, 0) = R.at<double>(1, 0);
+	H.at<double>(1, 1) = R.at<double>(1, 1);
+	H.at<double>(1, 2) = R.at<double>(1, 2);
+
+	H.at<double>(2, 0) = 0.0;
+	H.at<double>(2, 1) = 0.0;
+	H.at<double>(2, 2) = 1.0;
+	
+	//Mat H = findHomography(obj, scene, RANSAC);
+	//-- Get the corners from the image_1 ( the object to be "detected" )
+	std::vector<Point2f> obj_corners(4);
+	obj_corners[0] = cvPoint(0, 0);
+	obj_corners[1] = cvPoint(img_1.cols, 0);
+	obj_corners[2] = cvPoint(img_1.cols, img_1.rows);
+	obj_corners[3] = cvPoint(0, img_1.rows);
+	std::vector<Point2f> scene_corners(4);
+	perspectiveTransform(obj_corners, scene_corners, H);
+	Point2f offset = obj_corners[1] - obj_corners[0];
+	//-- Draw lines between the corners (the mapped object in the scene - image_2 )
+	Point2f point1 = scene_corners[0] + Point2f(img_1.cols, 0) - offset;
+	Point2f point2 = scene_corners[1] + Point2f(img_1.cols, 0) - offset;
+	Point2f point3 = scene_corners[2] + Point2f(img_1.cols, 0) - offset;
+	Point2f point4 = scene_corners[3] + Point2f(img_1.cols, 0) - offset;
+	
+	block.point1 = point1;
+	block.point2 = point2;
+	block.point3 = point3;
+	block.point4 = point4;
+
+	// remove detected object
+	//rectangle(img_2, point1, point3, Scalar(255,255,255), CV_FILLED);
+
+
+	/*line(img_2, point1, point2, Scalar(0, 255, 0), 4);
+	line(img_2, point2, point3, Scalar(0, 255, 0), 4);
+	line(img_2, point3, point4, Scalar(0, 255, 0), 4);
+	line(img_2, point4, point1, Scalar(0, 255, 0), 4);*/
+	
+	left = Point2f( (point1.x + point4.x) / 2, (point1.y + point4.y) / 2 );
+	right = Point2f( (point2.x + point3.x) / 2, (point2.y + point3.y) / 2 );
+
+	block.left = left;
+	block.right = right;
+
+	//circle(img_2, left, 5, Scalar(255, 255, 255), CV_FILLED);
+	//circle(img_2, right, 5, Scalar(255, 255, 255), CV_FILLED);
+
+	cout << "left: " << left.x << " " << left.y << " " << endl ;
+	cout << "right: " << right.x << " " << right.y << " " << endl << endl ;
+
+
+	/*cout << "left: " << static_cast<int>( depthSpacePoints[left_index].X + 0.5f ) << " " << static_cast<int>( depthSpacePoints[left_index].Y + 0.5f ) << " " << endl ;
+	cout << "right: " << static_cast<int>( depthSpacePoints[right_index].X + 0.5f ) << " " << static_cast<int>( depthSpacePoints[right_index].Y + 0.5f ) << " " << endl << endl ;*/
+
+	keypoints_1.clear();
+	//keypoints_2.clear();
+	//matcher.clear();
+	//matches.clear();
+	obj.clear();
+	scene.clear();
+	scene_corners.clear();
+	obj_corners.clear();
+
+	//imshow("temp", temp);
+	//imshow("surf_Matches", img_matches);
+	//imshow("img_2", img_2);
+	//imshow("line", img_2);
+	return true;
+}
+
+void sobel(Mat grayImg, Mat grad) {
+	cv::Mat sobelImg;
+	cv::Mat grad_x, grad_y;
+	cv::Mat abs_grad_x, abs_grad_y;
+	int scale = 1;
+	int delta = 0;
+	int ddepth = CV_16S;
+
+	cv::Sobel( grayImg, grad_x, ddepth, 1, 0, 3, scale, delta, cv::BORDER_DEFAULT );
+	cv::convertScaleAbs( grad_x, abs_grad_x );
+
+	cv::Sobel( grayImg, grad_y, ddepth, 0, 1, 3, scale, delta, cv::BORDER_DEFAULT );
+	cv::convertScaleAbs( grad_y, abs_grad_y );
+
+	cv::addWeighted( abs_grad_x, 0.5, abs_grad_y, 0.5, 0, grad );
+	cv::threshold( grad, sobelImg, 70, 150, cv::THRESH_BINARY );
+}
+
+void Ransac(vector<KeyPoint> keypoints1, vector<KeyPoint> keypoints2, vector<DMatch> matchers) {
+    vector<Point2f> querymatches, trainmatches;
+    vector<KeyPoint> p1,p2;
+	vector<DMatch> final_matches = matchers;
+    for(int i=0;i<final_matches.size();i++)
+    {
+        p1.push_back(keypoints1[final_matches[i].queryIdx]);
+        p2.push_back(keypoints2[final_matches[i].trainIdx]);
+    }
+    for(int i=0;i<p1.size();i++)
+    {
+        querymatches.push_back(p1[i].pt);
+        trainmatches.push_back(p2[i].pt);
+    }
+    //cout<<querymatches[1]<<" and "<<trainmatches[1]<<endl;
+    vector<uchar> status;
+    Mat h = findHomography(querymatches,trainmatches,status,CV_FM_RANSAC,10);
+    int index=0;
+    vector<DMatch> super_final_matches;
+    for (int i=0;i<final_matches.size();i++)
+    {
+        if (status[i] != 0)
+        {
+        super_final_matches.push_back(final_matches[i]);
+            index++;
+        }
+    }
+	matchers.swap(super_final_matches);
+}
+
+void GetH(int x, int y, Mat image, float HSL[3]) {
+	float H, S, L;
+	Vec3b rgb=image.at<Vec3b>(y,x);
+	float B=(float)rgb[0]/255;
+	float G=(float)rgb[1]/255;
+	float R=(float)rgb[2]/255;
+	//cout << (int)image.at<Vec3b>(y,x)[0] << " " << (int)image.at<Vec3b>(y,x)[1] << " " << (int)image.at<Vec3b>(y,x)[2] << endl;
+	float max = 0, min = 9999, maxNum = 7, minNum = 7;
+	for ( int i = 0; i < 3; i++ ) {
+		if ( rgb.val[i] > max ) {
+			max = rgb.val[i];
+			maxNum = i;
+		}
+
+		if ( rgb.val[i] < min ) {
+			min = rgb.val[i];
+			minNum = i;
+		}
+	}
+
+	max = max/255;
+	min = min/255;
+
+	L = (max+min)/2;
+
+	if ( L < 0.5 ) {
+		S = (max-min)/(max+min);
+	}
+
+	if ( L >= 0.5 ) {
+		S = (max-min)/(2*(max+min));
+	}
+
+	if ( maxNum == 2 ) {
+		H = (60*(G-B))/S;
+	}
+
+	else if ( maxNum == 1 ) {
+		H = 120+(60*(B-R))/S;
+	}
+
+	else {
+		H = 240+(60*(R-G))/S;
+	}
+	HSL[0] = H;
+	HSL[1] = S;
+	HSL[2] = L;
+	//cout << "HSL: " << H << " " << S << " " << L << endl;
+}
+
+Mat Change(Mat src, Mat dst) {
+	src.copyTo(dst);
+	for ( int i = 0 ; i < src.rows ; i++ ) {
+		for ( int j = 0 ; j < src.cols ; j++ ) {
+			float HSL[3];
+			GetH(j, i, src, HSL);
+			if ( HSL[1] < 0.22 ) dst.at<Vec3b>(i, j) = Vec3b(255,255,255);
+			else if ( HSL[2] < 0.22 ) dst.at<Vec3b>(i, j) = Vec3b(255,255,255);
+			else if (HSL[0] > 200 && HSL[0] <= 240 ) dst.at<Vec3b>(i, j) = Vec3b(0,0,0); // blue
+			else if (HSL[0] > 240 && HSL[0] <= 360) dst.at<Vec3b>(i, j) = Vec3b(0,0,0);
+			else if (HSL[0] > 60 && HSL[0] <= 130 ) dst.at<Vec3b>(i, j) = Vec3b(0,0,0);  // green
+			else if (HSL[0] > 130 && HSL[0] <= 200) dst.at<Vec3b>(i, j) = Vec3b(0,0,0);
+			else if (HSL[0] > 40 && HSL[0] <= 60 ) dst.at<Vec3b>(i, j) = Vec3b(0,0,0);  // yellow
+			else if (HSL[0] >= -40 && HSL[0] < 11) dst.at<Vec3b>(i, j) = Vec3b(0,0,0); // red
+			else if (HSL[0] >= 11 && HSL[0] <= 40) {
+				if ( HSL[2] < 0.22 ) dst.at<Vec3b>(i, j) = Vec3b(255,255,255);  // brown wood
+				else if ( HSL[1] >= 0.4 ) dst.at<Vec3b>(i, j) = Vec3b(0,0,0); // orange 0.48
+				else dst.at<Vec3b>(i, j) = Vec3b(255,255,255); // wood
+			}
+			//else dst.at<Vec3b>(i, j) = Vec3b(255,255,255);
+		}
+	}
+	//imshow("test", dst);
+	return dst;
+}
+
+void RemoveOutRange(vector<DMatch> &matches, vector<KeyPoint>keypoints) {
+	float x[100], y[100];
+	float midx, midy;
+	int outRange = 0, outRange2 = 0;
+	vector<DMatch> temp, temp2;
+	for (size_t i = 0; i < matches.size(); i++)
+	{
+		//-- Get the keypoints from the good matches
+		
+		x[i] = keypoints[matches[i].trainIdx].pt.x;
+		y[i] = keypoints[matches[i].trainIdx].pt.y;
+	}
+
+	sort(x, x+matches.size());
+	sort(y, y+matches.size());
+	midx = x[matches.size()/2];
+	midy = y[matches.size()/2];
+
+	for (size_t i = 0; i < matches.size(); i++)
+	{
+		//-- Get the keypoints from the good matches
+		
+		if ( abs(keypoints[matches[i].trainIdx].pt.x - midx) > 60 ) // 50
+			outRange++;
+		else if ( abs(keypoints[matches[i].trainIdx].pt.y - midy) > 60 ) // 50
+			outRange++;
+		else
+			temp.push_back(matches[i]);
+
+		if ( abs(keypoints[matches[i].trainIdx].pt.x - midx) > 120 )
+			outRange2++;
+		else if ( abs(keypoints[matches[i].trainIdx].pt.y - midy) > 120 )
+			outRange2++;
+		else
+			temp2.push_back(matches[i]);
+	}
+	
+	if ( matches.size() - outRange >= 5 )
+		matches = temp;
+	else if ( matches.size() - outRange2 >= 5 )
+		matches = temp2;
+	else
+		cout << matches.size() - outRange2 << " keypoints, matching is probably error" << endl;
+
+	//cout << "level 1 : " << outRange << endl << "level 2 : " << outRange2 << endl;
+}
+
+
+
+float getDistance (Point2f point1,Point2f point2 )  
+{  
+    float distance;  
+    distance = powf((point1.x - point2.x),2) + powf((point1.y - point2.y),2);  
+    distance = sqrtf(distance);  
+  
+    return distance;  
+} 
+
+void ReadBlocks(blocks_img blocks[14]) {
+	blocks[0].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木2-3.PNG");
+	blocks[1].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木0-2.PNG");
+	blocks[2].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木1-2.PNG");
+	blocks[3].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木8-2.PNG");
+	blocks[4].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木H-3.PNG");
+	blocks[5].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木I-2.PNG");
+	blocks[6].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木W.PNG");
+	blocks[7].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木N-2.PNG");
+	blocks[8].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木R-2.PNG");
+	blocks[9].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木O-3.PNG");
+	blocks[10].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木B-2.PNG");
+	blocks[11].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木T-3.PNG");
+	blocks[12].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木I-2.PNG");
+	blocks[13].img = imread("E:\\LAB602資料\\雜用資料\\building_block_image\\black\\積木O-3.PNG");
+
+	for ( int i = 0 ; i < 14 ; i++ ) {
+		blocks[i].cimg = blocks[i].img;
+		blocks[i].find = false;
+	}
+}
+
+boolean checkError(blocks_img input, int index) {
+	boolean error = false;
+	float inputx, inputy;
+	inputx = (input.point1.x + input.point3.x)/2;
+	inputy = (input.point1.y + input.point3.y)/2;
+
+	if ( getDistance(input.point1 ,input.point2) > 80 || getDistance(input.point1 ,input.point2) < 40 ) return true;
+	for ( int i = 0 ; i < 14 ; i++ ) {
+		if ( i == index );
+		else if ( blocks[i].find ) {
+			float x, y;
+			x = (blocks[i].point1.x + blocks[i].point3.x)/2;
+			y = (blocks[i].point1.y + blocks[i].point3.y)/2;
+			if (getDistance(Point2f(inputx, inputy), Point2f(x,y)) < 60) {
+				error = true;
+				break;
+			}
+		}
+	}
+	
+	return error;
+}
+
+void WriteFile() {
+	fstream file;
+	file.open("E:\\LAB602資料\\position.txt",ios::out|ios::ate) ; 
+	if(!file){//如果開啟檔案失敗，fp為0；成功，fp為非0
+        cout<<"Fail to open file: "<<endl;
+    }
+
+	for (int i = 0 ; i < 14 ; i++) {
+		if ( blocks[i].find ) file << blocks[i].left.x << " " << blocks[i].left.y << " " << blocks[i].right.x << " " << blocks[i].right.y << endl;
+		else file << "0 0 0 0" << endl;
+	}
+	return;
+}
+
+void Contour(Mat img) {
+  Mat temp = img.clone();
+  Mat threshold_output, src_gray;
+  vector<vector<Point> > contours;
+  vector<Vec4i> hierarchy;
+  int thresh = 100;
+  int max_thresh = 255;
+  RNG rng(12345);
+
+  cvtColor( img, src_gray, CV_RGB2GRAY );
+  /*blur(src_gray, src_gray, Size(3,3));
+  Canny(src_gray, threshold_output, 50, 150, 3);*/
+  /// Detect edges using Threshold
+  threshold( src_gray, threshold_output, thresh, 255, THRESH_BINARY );
+  /// Find contours
+  findContours( threshold_output, contours, hierarchy, CV_RETR_CCOMP, CV_CHAIN_APPROX_SIMPLE );
+
+  /// Approximate contours to polygons + get bounding rects and circles
+  vector<vector<Point> > contours_poly( contours.size() );
+  vector<Rect> boundRect( contours.size() );
+  vector<Point2f>center( contours.size() );
+  vector<RotatedRect> minRect( contours.size() );
+
+  for( int i = 0; i < contours.size(); i++ )
+     { approxPolyDP( Mat(contours[i]), contours_poly[i], 3, true ); // 將Contours改為多邊形
+       boundRect[i] = boundingRect( Mat(contours_poly[i]) );
+	   minRect[i] = minAreaRect( Mat(contours[i]) ); //找出包含封閉Contours的最小矩形
+     }
+  
+  int time = 0;
+  /// Draw polygonal contour + bonding rects + circles
+  Mat drawing = Mat::zeros( threshold_output.size(), CV_8UC3 );
+  for( int i = 0; i< contours.size(); i++ )
+     {
+       Scalar color = Scalar( rng.uniform(0, 255), rng.uniform(0,255), rng.uniform(0,255) );
+       drawContours( drawing, contours_poly, i, color, 1, 8, vector<Vec4i>(), 0, Point() );
+       rectangle( drawing, boundRect[i].tl(), boundRect[i].br(), color, 2, 8, 0 );
+	   Point2f rect_points[4]; 
+	   minRect[i].points( rect_points );
+	   //for( int j = 0; j < 4; j++ )
+			//line( img, rect_points[j], rect_points[(j+1)%4], color, 1, 8 );
+	   if ((getDistance(rect_points[0], rect_points[1]) > 65 && getDistance(rect_points[0], rect_points[1]) < 100) && 
+		   (getDistance(rect_points[1], rect_points[2]) > 65 && getDistance(rect_points[1], rect_points[2]) < 100)) {
+		 boundingbox[time] = Point2f((rect_points[0].x+rect_points[2].x)/2, (rect_points[0].y+rect_points[2].y)/2);
+		 time++;
+		 cout << "in" << endl;
+		 //if (time==1){
+	     for( int j = 0; j < 4; j++ )
+			line( drawing, rect_points[j], rect_points[(j+1)%4], color, 1, 8 );
+
+		 Mat block ;//= img(rect);
+
+		 float len = getDistance(rect_points[0], rect_points[1]);
+		 cv::Point2f dst_points[] = {Point2f(0,len), Point2f(0,0), Point2f(len,0), Point2f(len,len)};
+		 Mat M = getPerspectiveTransform(rect_points, dst_points); //取得透視轉換矩陣
+		 cv::Mat perspective;
+		 cv::warpPerspective(img, perspective, M, cv::Size(960, 270), cv::INTER_LINEAR); //將得到的Contours透視轉換成正方形(block比對圖的大小)
+		 Rect rect2(0,0,len,len);
+		 Mat temp = perspective(rect2);
+		 //imshow("perspective", temp);
+		 block = temp.clone();
+		 
+		 int same[48] = {0};
+		 Mat src, roi;
+		 resize(block, src, Size(80,80));
+		 for ( int k = 0 ; k < 4 ; k++ ) {
+			for ( int m = 0 ; m < 12 ; m++ ) {
+				resize(blocks[m].cimg, roi, Size(80, 80));
+				Match(src, roi, same[(k * 12) + m]);
+			}
+			src = Rotate(src, 90);
+		 }
+		 int max = 0, index = 0;
+		 for ( int k = 0 ; k < 48 ; k++ ) {
+			if (max < same[k]) {
+				max = same[k];
+				index = k;
+			}
+		 }
+		 //cout << index << " " << same[index] << endl;
+		 //Point2f left, right;
+		 
+		 if ( index%12 != 5 && index%12 != 9 && blocks[index%12].find ) {  // error: repeat find
+			 if ( same[index] > blocks[index%12].confidence ) {
+				 ChargeRotation(index, rect_points, blocks[index%12].left, blocks[index%12].right);
+				 blocks[index%12].confidence = same[index];
+			 }
+		 }
+
+		 else if ( index%12 == 5 && blocks[5].find && blocks[12].find );
+		 else if ( index%12 == 9 && blocks[9].find && blocks[13].find );
+
+		 else if ( index%12 == 5 && blocks[5].find && !blocks[12].find ) {  // I
+			 ChargeRotation(index, rect_points, blocks[12].left, blocks[12].right);
+			 blocks[12].find = true;
+			 blocks[12].confidence = same[index];
+		 }
+
+		 else if ( index%12 == 9 && blocks[9].find && !blocks[13].find ) { // O
+			 ChargeRotation(index, rect_points, blocks[13].left, blocks[13].right);
+			 blocks[13].find = true;
+			 blocks[13].confidence = same[index];
+		 }
+
+		 else {
+			 ChargeRotation(index, rect_points, blocks[index%12].left, blocks[index%12].right);
+			 blocks[index%12].confidence = same[index];
+			 blocks[index%12].find = true;
+		 }
+		 
+		 //circle(img, left, 5, Scalar(0,255,0));
+		 //circle(img, right, 5, Scalar(0,0,255));
+	   //}
+	   }
+     }
+
+  /// Show in a window
+  //namedWindow( "Contours", CV_WINDOW_AUTOSIZE );
+  imshow( "Contours", drawing );
+  //imshow( "temp", img );
+}
+
+Mat Rotate(Mat src, float angle) {
+	Mat dst2 = Mat(src.rows, src.cols, src.type(), Scalar(255,255,255));
+	Point center = Point(dst2.cols/2, dst2.rows/2);
+    double scale = 1;
+
+    Mat rot_mat = getRotationMatrix2D(center, angle, scale);
+    warpAffine(src, dst2, rot_mat, dst2.size());
+	//imshow("origin", src);
+	//imshow("Affine", dst2);
+	return dst2;
+	//waitKey(0);
+}
+
+void Match(Mat src, Mat roi, int &same) {
+	//imshow("1", src);
+	//imshow("2", roi);
+	for ( int i = 6 ; i < src.rows-6; i ++ ) {
+		for ( int j = 6; j < src.cols-6; j++ ) {
+			if ( src.at<Vec3b>(i, j) == roi.at<Vec3b>(i, j) ) same++;
+		}
+	}
+	//cout << same << endl;
+}
+
+void ChargeRotation(int index, Point2f point[4], Point2f &left, Point2f &right) {
+	int rnum = index / 12;
+	if (rnum == 0) {
+		left = Point2f((point[0].x + point[1].x)/2, (point[0].y + point[1].y)/2);
+		right = Point2f((point[2].x + point[3].x)/2, (point[2].y + point[3].y)/2);
+	}
+
+	else if (rnum == 1) {
+		left = Point2f((point[1].x + point[2].x)/2, (point[1].y + point[2].y)/2);
+		right = Point2f((point[3].x + point[0].x)/2, (point[3].y + point[0].y)/2);
+	}
+
+	else if (rnum == 2) {
+		left = Point2f((point[2].x + point[3].x)/2, (point[2].y + point[3].y)/2);
+		right = Point2f((point[0].x + point[1].x)/2, (point[0].y + point[1].y)/2);
+	}
+
+	else if (rnum == 3) {
+		left = Point2f((point[0].x + point[3].x)/2, (point[0].y + point[3].y)/2);
+		right = Point2f((point[1].x + point[2].x)/2, (point[1].y + point[2].y)/2);
+	}
+}
+
